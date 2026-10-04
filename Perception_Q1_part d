@@ -1,0 +1,146 @@
+import cv2
+import numpy as np
+import os
+import glob
+import zipfile
+import matplotlib.pyplot as plt
+
+# Unzip the data
+
+with zipfile.ZipFile("SeDriCa_perception_starter_data.zip", 'r') as zip_ref:
+    zip_ref.extractall("perception_data")
+
+
+# ---------- Settings (state these in your report) ----------
+BRIGHTNESS_THRESHOLD = 150   # pixel value above this = "lane paint"
+V_NEAR = 260                 # near row
+V_FAR = 170                  # far row
+# Region used: the entire width of the image at each row (no cropping)
+# Lane-shape assumption: the LEFTMOST bright cluster in the row is the
+# left boundary, the RIGHTMOST bright cluster is the right boundary.
+
+
+def find_edges_in_row(row_pixels, threshold=BRIGHTNESS_THRESHOLD):
+    """Finds the leftmost and rightmost bright clusters in a single row.
+    Returns (None, None) if fewer than 2 clusters are found (unknown)."""
+
+    bright_idx = np.where(row_pixels > threshold)[0]
+
+    if len(bright_idx) == 0:
+        return None, None  # nothing bright at all -> unknown
+
+    # Group consecutive bright pixels into clusters
+    groups = []
+    start = bright_idx[0]
+    prev = bright_idx[0]
+    for idx in bright_idx[1:]:
+        if idx - prev > 5:   # a gap means a new cluster starts
+            groups.append((start, prev))
+            start = idx
+        prev = idx
+    groups.append((start, prev))
+
+    if len(groups) < 2:
+        return None, None  # can't confidently tell left from right -> unknown
+
+    left_cluster = groups[0]
+    right_cluster = groups[-1]
+    left_pos = (left_cluster[0] + left_cluster[1]) / 2
+    right_pos = (right_cluster[0] + right_cluster[1]) / 2
+
+    return left_pos, right_pos
+
+
+def detect_lane_center(img_bgr, v_near=V_NEAR, v_far=V_FAR, threshold=BRIGHTNESS_THRESHOLD):
+    """Takes one frame, returns (u_n, u_f). Each is a number, or None if unknown."""
+
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+
+    left_n, right_n = find_edges_in_row(gray[v_near, :], threshold)
+    left_f, right_f = find_edges_in_row(gray[v_far, :], threshold)
+
+    u_n = (left_n + right_n) / 2 if left_n is not None else None
+    u_f = (left_f + right_f) / 2 if left_f is not None else None
+
+    return u_n, u_f
+
+# ---------- Step 1: Calibrate expected lane width at the far row ----------
+# Use a few clean clear-sequence frames to learn the relationship
+# between near-row width and far-row width.
+
+def calibrate_lane_width(folder, v_near=V_NEAR, v_far=V_FAR, n_samples=10):
+    files = sorted(glob.glob(os.path.join(folder, "*.png")))[:n_samples]
+    ratios = []
+    for f in files:
+        img = cv2.imread(f)
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        ln, rn = find_edges_in_row(gray[v_near, :])
+        lf, rf = find_edges_in_row(gray[v_far, :])
+        if ln is not None and lf is not None:
+            width_near = rn - ln
+            width_far = rf - lf
+            ratios.append(width_far / width_near)
+    return np.mean(ratios)
+
+WIDTH_RATIO = calibrate_lane_width("perception_data/city/lane/clear")
+print(f"Calibrated far/near width ratio: {WIDTH_RATIO:.3f}")
+
+
+# ---------- Step 2: Revised detector with the near-far agreement cue ----------
+
+def detect_lane_center_v2(img_bgr, v_near=V_NEAR, v_far=V_FAR,
+                            threshold=BRIGHTNESS_THRESHOLD,
+                            width_ratio=WIDTH_RATIO, tolerance=25):
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+
+    left_n, right_n = find_edges_in_row(gray[v_near, :], threshold)
+    u_n = (left_n + right_n) / 2 if left_n is not None else None
+
+    # Find ALL bright clusters at the far row (not just assume first/last are correct)
+    row_f = gray[v_far, :]
+    bright_idx = np.where(row_f > threshold)[0]
+    clusters = []
+    if len(bright_idx) > 0:
+        start = bright_idx[0]; prev = bright_idx[0]
+        for idx in bright_idx[1:]:
+            if idx - prev > 5:
+                clusters.append((start + prev) / 2)
+                start = idx
+            prev = idx
+        clusters.append((start + prev) / 2)
+
+    u_f = None
+    confidence_f = 0.0
+
+    if u_n is not None and len(clusters) >= 2:
+        # Predict where far-row edges SHOULD be, based on near-row center and calibrated width
+        near_width = right_n - left_n
+        expected_far_width = near_width * width_ratio
+        expected_left = u_n - expected_far_width / 2
+        expected_right = u_n + expected_far_width / 2
+
+        # Only accept clusters close to the EXPECTED positions
+        valid_left = [c for c in clusters if abs(c - expected_left) < tolerance]
+        valid_right = [c for c in clusters if abs(c - expected_right) < tolerance]
+
+        if valid_left and valid_right:
+            best_left = min(valid_left, key=lambda c: abs(c - expected_left))
+            best_right = min(valid_right, key=lambda c: abs(c - expected_right))
+            u_f = (best_left + best_right) / 2
+
+            # Confidence: how close the accepted clusters are to the prediction
+            err_left = abs(best_left - expected_left)
+            err_right = abs(best_right - expected_right)
+            avg_err = (err_left + err_right) / 2
+            confidence_f = max(0.0, 1.0 - avg_err / tolerance)
+
+    confidence_n = 1.0 if u_n is not None else 0.0
+
+    return u_n, u_f, confidence_n, confidence_f
+
+
+# ---------- Step 3: Test it on the frame that failed before ----------
+
+img_test = cv2.imread("perception_data/city/lane/missing/010.png")
+u_n, u_f, conf_n, conf_f = detect_lane_center_v2(img_test)
+print(f"Revised result: u_n={u_n}, u_f={u_f}, confidence_n={conf_n:.2f}, confidence_f={conf_f:.2f}")
