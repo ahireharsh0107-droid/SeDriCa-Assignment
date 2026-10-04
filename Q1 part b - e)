@@ -1,0 +1,158 @@
+"""
+2D grid-based A* path planner with visualisation.
+
+Coordinates are (x, y): x = column (left -> right), y = row (bottom -> top).
+"""
+import heapq
+import math
+import matplotlib.pyplot as plt
+from matplotlib.patches import Rectangle
+
+
+def heuristic(a, b):
+    """Octile distance: admissible & consistent for 8-connected movement."""
+    dx, dy = abs(a[0] - b[0]), abs(a[1] - b[1])
+    return (dx + dy) + (math.sqrt(2) - 2) * min(dx, dy)
+
+
+def astar(width, height, start, goal, obstacles, allow_diagonal=True):
+    """Returns (path, explored_in_order). path is None if no route exists."""
+    obstacles = set(obstacles)
+
+    if start in obstacles or goal in obstacles:
+        raise ValueError("Start or goal lies on an obstacle.")
+    for name, (x, y) in (("start", start), ("goal", goal)):
+        if not (0 <= x < width and 0 <= y < height):
+            raise ValueError(f"{name} is outside the grid.")
+
+    if allow_diagonal:
+        moves = [(1, 0, 1), (-1, 0, 1), (0, 1, 1), (0, -1, 1),
+                 (1, 1, math.sqrt(2)), (1, -1, math.sqrt(2)),
+                 (-1, 1, math.sqrt(2)), (-1, -1, math.sqrt(2))]
+    else:
+        moves = [(1, 0, 1), (-1, 0, 1), (0, 1, 1), (0, -1, 1)]
+
+    open_heap = [(heuristic(start, goal), 0.0, start)]  # (f, g, node)
+    g_cost = {start: 0.0}
+    parent = {start: None}
+    closed = set()
+    explored = []  # nodes in the order they were expanded
+
+    while open_heap:
+        f, g, current = heapq.heappop(open_heap)
+        if current in closed:
+            continue
+        closed.add(current)
+        explored.append(current)
+
+        if current == goal:  # rebuild path
+            path = []
+            while current is not None:
+                path.append(current)
+                current = parent[current]
+            return path[::-1], explored
+
+        cx, cy = current
+        for dx, dy, cost in moves:
+            nx, ny = cx + dx, cy + dy
+            nb = (nx, ny)
+            if not (0 <= nx < width and 0 <= ny < height) or nb in obstacles or nb in closed:
+                continue
+            # Don't cut corners diagonally between two obstacles
+            if dx != 0 and dy != 0 and ((cx + dx, cy) in obstacles or (cx, cy + dy) in obstacles):
+                continue
+            new_g = g + cost
+            if new_g < g_cost.get(nb, float("inf")):
+                g_cost[nb] = new_g
+                parent[nb] = current
+                heapq.heappush(open_heap, (new_g + heuristic(nb, goal), new_g, nb))
+
+    return None, explored
+
+
+def visualise(width, height, start, goal, obstacles, path, explored, save_as=None):
+    fig, ax = plt.subplots(figsize=(7, 7))
+
+    for (x, y) in obstacles:
+        ax.add_patch(Rectangle((x - .5, y - .5), 1, 1, color="black"))
+    for (x, y) in explored:
+        if (x, y) not in (start, goal):
+            ax.add_patch(Rectangle((x - .5, y - .5), 1, 1, color="#9ecae1", alpha=.8))
+    if path:
+        px, py = zip(*path)
+        ax.plot(px, py, "r-o", lw=3, ms=6, label=f"Final path ({len(path)} nodes)")
+
+    ax.add_patch(Rectangle((start[0] - .5, start[1] - .5), 1, 1, color="green"))
+    ax.add_patch(Rectangle((goal[0] - .5, goal[1] - .5), 1, 1, color="orange"))
+    ax.text(*start, "S", ha="center", va="center", color="white", fontweight="bold")
+    ax.text(*goal, "G", ha="center", va="center", color="white", fontweight="bold")
+
+    # legend proxies
+    ax.add_patch(Rectangle((0, 0), 0, 0, color="#9ecae1", label=f"Explored ({len(explored)} nodes)"))
+    ax.add_patch(Rectangle((0, 0), 0, 0, color="black", label="Obstacle"))
+
+    ax.set_xlim(-.5, width - .5)
+    ax.set_ylim(-.5, height - .5)
+    ax.set_xticks(range(width))
+    ax.set_yticks(range(height))
+    # Grid lines on cell borders (shifted by -0.5); labels stay at cell centres
+    ax.set_xticks([i - 0.5 for i in range(width + 1)], minor=True)
+    ax.set_yticks([i - 0.5 for i in range(height + 1)], minor=True)
+    ax.grid(which="minor", color="lightgray")
+    ax.grid(which="major", visible=False)
+    ax.tick_params(which="minor", length=0)
+    ax.set_aspect("equal")
+    ax.set_xlabel("x")
+    ax.set_ylabel("y")
+    ax.set_title("A* on a 2D grid: explored nodes and final path on road-like environment")
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.08), ncol=3, frameon=False)
+    plt.tight_layout()
+    # if save_as:
+    #     plt.savefig(save_as, dpi=150)
+    plt.show()
+
+
+if __name__ == "__main__":
+    # ---- User-defined settings ----
+    GRID_W, GRID_H = 20, 20
+
+    # Segment 1: Vertical corridor, 3 cells wide
+    Free_road = set()
+    for x in range(2, 5):
+        for y in range(0, 13):
+            Free_road.add((x, y))
+
+    # Segment 2: Horizontal corridor, 3 cells wide
+    for x in range(2, 20):
+        for y in range(10, 13):
+            Free_road.add((x, y))
+
+    # Segment 3: vertical corridor, 3 cells wide
+    for x in range(17, 20):
+        for y in range(10, 20):
+            Free_road.add((x, y))
+
+    START = (3, 1)
+    GOAL = (18, 18)
+
+    # Everything become wall which is not in the Free_road
+    wall = [(x, y) for x in range(GRID_W) for y in range(GRID_H) if (x, y) not in Free_road]
+
+    # 3, 4 extra obstacles added in between the path
+    extra = [(4, 6), (3, 9), (5, 10), (8, 11), (16, 12)]
+    OBSTACLES = wall + extra
+    ALLOW_DIAGONAL = True
+    # --------------------------------
+
+    path, explored = astar(GRID_W, GRID_H, START, GOAL, OBSTACLES, ALLOW_DIAGONAL)
+
+    if path is None:
+        print("No path found.")
+    else:
+        cost = sum(math.dist(a, b) for a, b in zip(path, path[1:]))
+        print("Path:", path)
+        print(f"Path cost: {cost:.3f}")
+    print(f"Nodes explored: {len(explored)}")
+
+    visualise(GRID_W, GRID_H, START, GOAL, OBSTACLES, path, explored,
+              save_as="/mnt/user-data/outputs/astar_result.png")
