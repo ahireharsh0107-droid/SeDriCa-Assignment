@@ -1,0 +1,115 @@
+import cv2
+import numpy as np
+import os
+import glob
+import zipfile
+import matplotlib.pyplot as plt
+
+# Unzip the data
+
+with zipfile.ZipFile("SeDriCa_perception_starter_data.zip", 'r') as zip_ref:
+    zip_ref.extractall("perception_data")
+
+
+# ---------- Settings (state these in your report) ----------
+BRIGHTNESS_THRESHOLD = 150   # pixel value above this = "lane paint"
+V_NEAR = 260                 # near row
+V_FAR = 170                  # far row
+# Region used: the entire width of the image at each row (no cropping)
+# Lane-shape assumption: the LEFTMOST bright cluster in the row is the
+# left boundary, the RIGHTMOST bright cluster is the right boundary.
+
+
+def find_edges_in_row(row_pixels, threshold=BRIGHTNESS_THRESHOLD):
+    """Finds the leftmost and rightmost bright clusters in a single row.
+    Returns (None, None) if fewer than 2 clusters are found (unknown)."""
+
+    bright_idx = np.where(row_pixels > threshold)[0]
+
+    if len(bright_idx) == 0:
+        return None, None  # nothing bright at all -> unknown
+
+    # Group consecutive bright pixels into clusters
+    groups = []
+    start = bright_idx[0]
+    prev = bright_idx[0]
+    for idx in bright_idx[1:]:
+        if idx - prev > 5:   # a gap means a new cluster starts
+            groups.append((start, prev))
+            start = idx
+        prev = idx
+    groups.append((start, prev))
+
+    if len(groups) < 2:
+        return None, None  # can't confidently tell left from right -> unknown
+
+    left_cluster = groups[0]
+    right_cluster = groups[-1]
+    left_pos = (left_cluster[0] + left_cluster[1]) / 2
+    right_pos = (right_cluster[0] + right_cluster[1]) / 2
+
+    return left_pos, right_pos
+
+
+def detect_lane_center(img_bgr, v_near=V_NEAR, v_far=V_FAR, threshold=BRIGHTNESS_THRESHOLD):
+    """Takes one frame, returns (u_n, u_f). Each is a number, or None if unknown."""
+
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+
+    left_n, right_n = find_edges_in_row(gray[v_near, :], threshold)
+    left_f, right_f = find_edges_in_row(gray[v_far, :], threshold)
+
+    u_n = (left_n + right_n) / 2 if left_n is not None else None
+    u_f = (left_f + right_f) / 2 if left_f is not None else None
+
+    return u_n, u_f
+
+def build_evidence_panel(img_bgr, img_rgb, title, v_near=260, v_far=170, threshold=150):
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+
+    fig, axes = plt.subplots(1, 4, figsize=(20, 4))
+    fig.suptitle(title, fontsize=14)
+
+    # Stage 1: original image
+    axes[0].imshow(img_rgb)
+    axes[0].set_title("1. Original")
+
+    # Stage 2: region of interest (the two rows we scan)
+    axes[1].imshow(img_rgb)
+    axes[1].axhline(y=v_near, color='cyan', linewidth=2)
+    axes[1].axhline(y=v_far, color='magenta', linewidth=2)
+    axes[1].set_title("2. Region of interest\n(rows scanned)")
+
+    # Stage 3: the cue extracted (brightness profile at far row, with threshold line)
+    row_f = gray[v_far, :]
+    axes[2].plot(row_f, color='black')
+    axes[2].axhline(y=threshold, color='red', linestyle='--', label=f'threshold={threshold}')
+    axes[2].set_title(f"3. Brightness cue\n(row v={v_far})")
+    axes[2].set_xlabel("pixel u")
+    axes[2].set_ylabel("brightness")
+    axes[2].legend(fontsize=8)
+
+    # Stage 4: proposed center, marked on the image
+    u_n, u_f = detect_lane_center(img_bgr, v_near, v_far, threshold)
+    axes[3].imshow(img_rgb)
+    axes[3].axhline(y=v_near, color='cyan', linewidth=1, alpha=0.5)
+    axes[3].axhline(y=v_far, color='magenta', linewidth=1, alpha=0.5)
+    if u_n is not None:
+        axes[3].scatter([u_n], [v_near], c='lime', s=100, marker='x')
+    if u_f is not None:
+        axes[3].scatter([u_f], [v_far], c='yellow', s=100, marker='x')
+    axes[3].set_title("4. Proposed center\n(x = detected)")
+
+    plt.tight_layout()
+    plt.show()
+
+
+# Load the two comparison frames
+img_clear = cv2.imread("perception_data/city/lane/clear/010.png")
+img_clear_rgb = cv2.cvtColor(img_clear, cv2.COLOR_BGR2RGB)
+
+img_missing = cv2.imread("perception_data/city/lane/missing/010.png")
+img_missing_rgb = cv2.cvtColor(img_missing, cv2.COLOR_BGR2RGB)
+
+build_evidence_panel(img_clear, img_clear_rgb, "Clear frame 010 (easy case)")
+build_evidence_panel(img_missing, img_missing_rgb, "Missing frame 010 (difficult case)")
