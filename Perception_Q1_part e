@@ -1,0 +1,231 @@
+import cv2
+import numpy as np
+import os
+import glob
+import zipfile
+import matplotlib.pyplot as plt
+import pandas as pd
+
+# Unzip the data
+
+with zipfile.ZipFile("SeDriCa_perception_starter_data.zip", 'r') as zip_ref:
+    zip_ref.extractall("perception_data")
+
+
+# ---------- Settings (state these in your report) ----------
+BRIGHTNESS_THRESHOLD = 150   # pixel value above this = "lane paint"
+V_NEAR = 260                 # near row
+V_FAR = 170                  # far row
+# Region used: the entire width of the image at each row (no cropping)
+# Lane-shape assumption: the LEFTMOST bright cluster in the row is the
+# left boundary, the RIGHTMOST bright cluster is the right boundary.
+
+
+def find_edges_in_row(row_pixels, threshold=BRIGHTNESS_THRESHOLD):
+    """Finds the leftmost and rightmost bright clusters in a single row.
+    Returns (None, None) if fewer than 2 clusters are found (unknown)."""
+
+    bright_idx = np.where(row_pixels > threshold)[0]
+
+    if len(bright_idx) == 0:
+        return None, None  # nothing bright at all -> unknown
+
+    # Group consecutive bright pixels into clusters
+    groups = []
+    start = bright_idx[0]
+    prev = bright_idx[0]
+    for idx in bright_idx[1:]:
+        if idx - prev > 5:   # a gap means a new cluster starts
+            groups.append((start, prev))
+            start = idx
+        prev = idx
+    groups.append((start, prev))
+
+    if len(groups) < 2:
+        return None, None  # can't confidently tell left from right -> unknown
+
+    left_cluster = groups[0]
+    right_cluster = groups[-1]
+    left_pos = (left_cluster[0] + left_cluster[1]) / 2
+    right_pos = (right_cluster[0] + right_cluster[1]) / 2
+
+    return left_pos, right_pos
+
+
+def detect_lane_center(img_bgr, v_near=V_NEAR, v_far=V_FAR, threshold=BRIGHTNESS_THRESHOLD):
+    """Takes one frame, returns (u_n, u_f). Each is a number, or None if unknown."""
+
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+
+    left_n, right_n = find_edges_in_row(gray[v_near, :], threshold)
+    left_f, right_f = find_edges_in_row(gray[v_far, :], threshold)
+
+    u_n = (left_n + right_n) / 2 if left_n is not None else None
+    u_f = (left_f + right_f) / 2 if left_f is not None else None
+
+    return u_n, u_f
+
+# ---------- Step 1: Calibrate expected lane width at the far row ----------
+# Use a few clean clear-sequence frames to learn the relationship
+# between near-row width and far-row width.
+
+def calibrate_lane_width(folder, v_near=V_NEAR, v_far=V_FAR, n_samples=10):
+    files = sorted(glob.glob(os.path.join(folder, "*.png")))[:n_samples]
+    ratios = []
+    for f in files:
+        img = cv2.imread(f)
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        ln, rn = find_edges_in_row(gray[v_near, :])
+        lf, rf = find_edges_in_row(gray[v_far, :])
+        if ln is not None and lf is not None:
+            width_near = rn - ln
+            width_far = rf - lf
+            ratios.append(width_far / width_near)
+    return np.mean(ratios)
+
+WIDTH_RATIO = calibrate_lane_width("perception_data/city/lane/clear")
+print(f"Calibrated far/near width ratio: {WIDTH_RATIO:.3f}")
+
+
+# ---------- Step 2: Revised detector with the near-far agreement cue ----------
+
+def detect_lane_center_v2(img_bgr, v_near=V_NEAR, v_far=V_FAR,
+                            threshold=BRIGHTNESS_THRESHOLD,
+                            width_ratio=WIDTH_RATIO, tolerance=25):
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+
+    left_n, right_n = find_edges_in_row(gray[v_near, :], threshold)
+    u_n = (left_n + right_n) / 2 if left_n is not None else None
+
+    # Find ALL bright clusters at the far row (not just assume first/last are correct)
+    row_f = gray[v_far, :]
+    bright_idx = np.where(row_f > threshold)[0]
+    clusters = []
+    if len(bright_idx) > 0:
+        start = bright_idx[0]; prev = bright_idx[0]
+        for idx in bright_idx[1:]:
+            if idx - prev > 5:
+                clusters.append((start + prev) / 2)
+                start = idx
+            prev = idx
+        clusters.append((start + prev) / 2)
+
+    u_f = None
+    confidence_f = 0.0
+
+    if u_n is not None and len(clusters) >= 2:
+        # Predict where far-row edges SHOULD be, based on near-row center and calibrated width
+        near_width = right_n - left_n
+        expected_far_width = near_width * width_ratio
+        expected_left = u_n - expected_far_width / 2
+        expected_right = u_n + expected_far_width / 2
+
+        # Only accept clusters close to the EXPECTED positions
+        valid_left = [c for c in clusters if abs(c - expected_left) < tolerance]
+        valid_right = [c for c in clusters if abs(c - expected_right) < tolerance]
+
+        if valid_left and valid_right:
+            best_left = min(valid_left, key=lambda c: abs(c - expected_left))
+            best_right = min(valid_right, key=lambda c: abs(c - expected_right))
+            u_f = (best_left + best_right) / 2
+
+            # Confidence: how close the accepted clusters are to the prediction
+            err_left = abs(best_left - expected_left)
+            err_right = abs(best_right - expected_right)
+            avg_err = (err_left + err_right) / 2
+            confidence_f = max(0.0, 1.0 - avg_err / tolerance)
+
+    confidence_n = 1.0 if u_n is not None else 0.0
+
+    return u_n, u_f, confidence_n, confidence_f
+
+
+# ---------- Step 3: Test it on the frame that failed before ----------
+
+img_test = cv2.imread("perception_data/city/lane/missing/010.png")
+u_n, u_f, conf_n, conf_f = detect_lane_center_v2(img_test)
+print(f"Revised result: u_n={u_n}, u_f={u_f}, confidence_n={conf_n:.2f}, confidence_f={conf_f:.2f}")
+
+
+sequences = {
+    "clear":   "perception_data/city/lane/clear",
+    "shadow":  "perception_data/city/lane/shadow",
+    "missing": "perception_data/city/lane/missing",
+}
+
+# ---------- Load the answer key ----------
+reference = pd.read_csv("perception_data/city/lane_reference.csv")
+
+def get_reference(sequence, frame_number):
+    row = reference[(reference["sequence"] == sequence) & (reference["frame"] == frame_number)]
+    if len(row) == 0:
+        return None, None
+    return row.iloc[0]["near_center_x_px"], row.iloc[0]["far_center_x_px"]
+
+
+# ---------- Run both baseline and revised detector, collect results ----------
+
+def evaluate_sequence(folder, sequence_name, use_revised=False):
+    files = sorted(glob.glob(os.path.join(folder, "*.png")))
+    errors_n, errors_f = [], []
+    unknown_n, unknown_f = 0, 0
+
+    for f in files:
+        frame_num = int(os.path.basename(f).replace(".png", ""))
+        img = cv2.imread(f)
+        true_n, true_f = get_reference(sequence_name, frame_num)
+
+        if use_revised:
+            pred_n, pred_f, conf_n, conf_f = detect_lane_center_v2(img)
+        else:
+            pred_n, pred_f = detect_lane_center(img)
+
+        if pred_n is None:
+            unknown_n += 1
+        else:
+            errors_n.append(abs(pred_n - true_n))
+
+        if pred_f is None:
+            unknown_f += 1
+        else:
+            errors_f.append(abs(pred_f - true_f))
+
+    mae_n = np.mean(errors_n) if errors_n else None
+    mae_f = np.mean(errors_f) if errors_f else None
+    frac_unknown_n = unknown_n / len(files)
+    frac_unknown_f = unknown_f / len(files)
+
+    return mae_n, mae_f, frac_unknown_n, frac_unknown_f
+
+
+# ---------- Build the comparison table ----------
+
+print(f"{'Sequence':<10}{'Version':<10}{'MAE near':<12}{'MAE far':<12}{'Unk near':<12}{'Unk far':<12}")
+for seq_name, folder in sequences.items():
+    for version, use_rev in [("baseline", False), ("revised", True)]:
+        mae_n, mae_f, un, uf = evaluate_sequence(folder, seq_name, use_rev)
+        mae_n_str = f"{mae_n:.2f}" if mae_n is not None else "N/A"
+        mae_f_str = f"{mae_f:.2f}" if mae_f is not None else "N/A"
+        print(f"{seq_name:<10}{version:<10}{mae_n_str:<12}{mae_f_str:<12}{un:<12.2%}{uf:<12.2%}")
+
+
+# ---------- Plot estimated vs reference u_n through the missing sequence ----------
+
+files = sorted(glob.glob(os.path.join("perception_data/city/lane/missing", "*.png")))
+true_vals, pred_vals = [], []
+for f in files:
+    frame_num = int(os.path.basename(f).replace(".png", ""))
+    img = cv2.imread(f)
+    true_n, _ = get_reference("missing", frame_num)
+    pred_n, _ = detect_lane_center(img)
+    true_vals.append(true_n)
+    pred_vals.append(pred_n if pred_n is not None else np.nan)
+
+plt.figure(figsize=(10, 4))
+plt.plot(true_vals, 'g-o', label='Reference (true) u_n')
+plt.plot(pred_vals, 'r--x', label='Predicted u_n')
+plt.xlabel("frame number")
+plt.ylabel("pixel position")
+plt.title("Estimated vs reference u_n through missing sequence")
+plt.legend()
+plt.show()
