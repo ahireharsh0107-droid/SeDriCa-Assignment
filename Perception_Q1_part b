@@ -1,1 +1,98 @@
+  import cv2
+  import numpy as np
+  import os
+  import glob
+  import zipfile
+  import matplotlib.pyplot as plt
 
+  # Unzip the data
+
+  with zipfile.ZipFile("SeDriCa_perception_starter_data.zip", 'r') as zip_ref:
+      zip_ref.extractall("perception_data")
+
+
+  # ---------- Settings (state these in your report) ----------
+  BRIGHTNESS_THRESHOLD = 150   # pixel value above this = "lane paint"
+  V_NEAR = 260                 # near row
+  V_FAR = 170                  # far row
+  # Region used: the entire width of the image at each row (no cropping)
+  # Lane-shape assumption: the LEFTMOST bright cluster in the row is the
+  # left boundary, the RIGHTMOST bright cluster is the right boundary.
+
+
+  def find_edges_in_row(row_pixels, threshold=BRIGHTNESS_THRESHOLD):
+      """Finds the leftmost and rightmost bright clusters in a single row.
+      Returns (None, None) if fewer than 2 clusters are found (unknown)."""
+
+      bright_idx = np.where(row_pixels > threshold)[0]
+
+      if len(bright_idx) == 0:
+          return None, None  # nothing bright at all -> unknown
+
+      # Group consecutive bright pixels into clusters
+      groups = []
+      start = bright_idx[0]
+      prev = bright_idx[0]
+      for idx in bright_idx[1:]:
+          if idx - prev > 5:   # a gap means a new cluster starts
+              groups.append((start, prev))
+              start = idx
+          prev = idx
+      groups.append((start, prev))
+
+      if len(groups) < 2:
+          return None, None  # can't confidently tell left from right -> unknown
+
+      left_cluster = groups[0]
+      right_cluster = groups[-1]
+      left_pos = (left_cluster[0] + left_cluster[1]) / 2
+      right_pos = (right_cluster[0] + right_cluster[1]) / 2
+
+      return left_pos, right_pos
+
+
+  def detect_lane_center(img_bgr, v_near=V_NEAR, v_far=V_FAR, threshold=BRIGHTNESS_THRESHOLD):
+      """Takes one frame, returns (u_n, u_f). Each is a number, or None if unknown."""
+
+      gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+
+      left_n, right_n = find_edges_in_row(gray[v_near, :], threshold)
+      left_f, right_f = find_edges_in_row(gray[v_far, :], threshold)
+
+      u_n = (left_n + right_n) / 2 if left_n is not None else None
+      u_f = (left_f + right_f) / 2 if left_f is not None else None
+
+      return u_n, u_f
+
+
+  # ---------- Run the baseline, unchanged, on all 72 frames ----------
+
+  def run_baseline_on_sequence(folder):
+      results = []
+      files = sorted(glob.glob(os.path.join(folder, "*.png")))
+      for f in files:
+          img = cv2.imread(f)
+          u_n, u_f = detect_lane_center(img)
+          results.append({"frame": os.path.basename(f), "u_n": u_n, "u_f": u_f})
+      return results
+
+
+  sequences = {
+      "clear":   "perception_data/city/lane/clear",
+      "shadow":  "perception_data/city/lane/shadow",
+      "missing": "perception_data/city/lane/missing",
+  }
+
+  all_results = {}
+  for name, folder in sequences.items():
+      all_results[name] = run_baseline_on_sequence(folder)
+      unknown_n = sum(1 for r in all_results[name] if r["u_n"] is None)
+      unknown_f = sum(1 for r in all_results[name] if r["u_f"] is None)
+      print(f"--- {name} ({len(all_results[name])} frames) ---")
+      print(f"  unknown at near row: {unknown_n}, unknown at far row: {unknown_f}")
+
+  print("\nSample output (first 3 frames of each sequence):")
+  for name in sequences:
+      print(f"\n{name}:")
+      for r in all_results[name][:3]:
+          print(" ", r)
