@@ -1,0 +1,77 @@
+import pandas as pd
+import matplotlib.pyplot as plt
+import zipfile
+
+# Unzip the data
+
+with zipfile.ZipFile("SeDriCa_perception_starter_data.zip", 'r') as zip_ref:
+    zip_ref.extractall("perception_data")
+
+evidence = pd.read_csv("perception_data/city/crossing_evidence.csv")
+
+# ---------- Thresholds (state these in your report) ----------
+PERSON_THRESHOLD_STOP = 0.6   # above this, treat a person as genuinely present
+RED_THRESHOLD_STOP = 0.6      # above this, treat the light as genuinely red
+PERSON_THRESHOLD_SLOW = 0.3   # above this but below STOP threshold = unclear, be cautious
+RED_THRESHOLD_SLOW = 0.3
+
+
+def baseline_rule(row):
+    person_score = row["person_score"]
+    red_score = row["red_score"]
+    v2x_light = row["v2x_light"]
+
+    # Priority 1: person likely in the way
+    if person_score > PERSON_THRESHOLD_STOP:
+        return "STOP", "person likely on crossing"
+
+    # Priority 2: light likely red (either camera OR V2X message agrees)
+    if red_score > RED_THRESHOLD_STOP or v2x_light == "red":
+        return "STOP", "red light detected"
+
+    # Priority 3: evidence is unclear, approach cautiously
+    if person_score > PERSON_THRESHOLD_SLOW or red_score > RED_THRESHOLD_SLOW:
+        return "SLOW", "evidence unresolved, approaching cautiously"
+
+    # Otherwise, safe to proceed
+    return "GO", "clear path, green light"
+
+
+# ---------- Run this rule on every frame of all three episodes ----------
+
+results = []
+for _, row in evidence.iterrows():
+    decision, reason = baseline_rule(row)
+    results.append({
+        "episode": row["episode"],
+        "frame": row["frame"],
+        "time_s": row["time_s"],
+        "decision": decision,
+        "reason": reason
+    })
+
+results_df = pd.DataFrame(results)
+print(results_df.head(10))
+
+
+# ---------- Show a timeline of decisions for each episode ----------
+
+decision_to_number = {"GO": 0, "SLOW": 1, "STOP": 2}
+
+fig, axes = plt.subplots(3, 1, figsize=(10, 8))
+episodes = ["clear_green", "late_red", "person_crossing"]
+
+for i, ep in enumerate(episodes):
+    ep_data = results_df[results_df["episode"] == ep]
+    decision_nums = ep_data["decision"].map(decision_to_number)
+    axes[i].step(ep_data["frame"], decision_nums, where="post", marker='o')
+    axes[i].set_yticks([0, 1, 2])
+    axes[i].set_yticklabels(["GO", "SLOW", "STOP"])
+    axes[i].set_title(f"Decision timeline: {ep}")
+    axes[i].set_xlabel("frame")
+    axes[i].grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+
+
